@@ -1,0 +1,480 @@
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jewelry Studio Pro - AI Background & Enhancement</title>
+    
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    
+    <!-- Babel for JSX compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Lucide Icons (Explicitly using UMD build for safety) -->
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+
+    <!-- Custom Tailwind Configuration & CSS -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        gold: {
+                            50: '#fffbeb',
+                            100: '#fef3c7',
+                            400: '#fbbf24',
+                            500: '#f59e0b',
+                            600: '#d97706',
+                            700: '#b45309',
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f9fafb;
+        }
+
+        .loader {
+            border: 3px solid #f3f3f3;
+            border-radius: 50%;
+            border-top: 3px solid #D97706;
+            width: 24px;
+            height: 24px;
+            -webkit-animation: spin 1s linear infinite; /* Safari */
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.05);
+        }
+
+        /* Dark Mode Theme Adjustments for static CSS */
+        @media (prefers-color-scheme: dark) {
+            body {
+                background-color: #111827; /* Tailwind gray-900 */
+            }
+            .glass-panel {
+                background: rgba(31, 41, 55, 0.7); /* Tailwind gray-800 */
+                border: 1px solid rgba(255, 255, 255, 0.05);
+                box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            }
+        }
+    </style>
+</head>
+<body class="min-h-screen text-gray-800 dark:text-gray-100 selection:bg-gold-500 selection:text-white transition-colors duration-300">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useEffect, useCallback } = React;
+
+        // Utility: Exponential backoff for fetch
+        const fetchWithRetry = async (url, options, maxRetries = 3) => {
+            let delay = 1000;
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (!response.ok) {
+                        if (response.status === 429) {
+                            throw new Error('Rate limited');
+                        }
+                        const errText = await response.text();
+                        throw new Error(`API Error: ${response.status} - ${errText}`);
+                    }
+                    return await response.json();
+                } catch (error) {
+                    if (i === maxRetries - 1) throw error;
+                    await new Promise(res => setTimeout(res, delay));
+                    delay *= 2;
+                }
+            }
+        };
+
+        // Utility: Convert File to Base64
+        const fileToBase64 = (file) => {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = () => resolve({
+                    dataUrl: reader.result,
+                    base64: reader.result.split(',')[1],
+                    mimeType: file.type
+                });
+                reader.onerror = error => reject(error);
+            });
+        };
+
+        // Safe Icon wrapper to prevent React DOM removeChild errors with Lucide
+        const Icon = ({ name, className }) => {
+            const spanRef = useRef(null);
+            useEffect(() => {
+                if (spanRef.current && window.lucide) {
+                    const i = document.createElement('i');
+                    i.setAttribute('data-lucide', name);
+                    if (className) i.className = className;
+                    spanRef.current.innerHTML = '';
+                    spanRef.current.appendChild(i);
+                    window.lucide.createIcons({ root: spanRef.current });
+                }
+            }, [name, className]);
+            return <span ref={spanRef} style={{ display: 'contents' }} />;
+        };
+
+        const App = () => {
+            const [originalImage, setOriginalImage] = useState(null);
+            const [processedImage, setProcessedImage] = useState(null);
+            const [isProcessing, setIsProcessing] = useState(false);
+            const [error, setError] = useState(null);
+            
+            // Settings
+            const [bgColor, setBgColor] = useState('white');
+            const [enhance, setEnhance] = useState(true);
+
+            const fileInputRef = useRef(null);
+            const cameraInputRef = useRef(null);
+
+            const handleFileUpload = async (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                if (!file.type.startsWith('image/')) {
+                    setError('Please upload a valid image file.');
+                    return;
+                }
+
+                try {
+                    const imageData = await fileToBase64(file);
+                    setOriginalImage(imageData);
+                    setProcessedImage(null);
+                    setError(null);
+                } catch (err) {
+                    setError('Failed to read image file.');
+                }
+            };
+
+            const triggerFileInput = () => {
+                fileInputRef.current.click();
+            };
+
+            const triggerCameraInput = (e) => {
+                e.stopPropagation();
+                cameraInputRef.current.click();
+            };
+
+            const processImage = async () => {
+                if (!originalImage) return;
+
+                setIsProcessing(true);
+                setError(null);
+
+                const apiKey = ""; // API key provided by Canvas runtime
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent?key=${apiKey}`;
+
+                let prompt = `Extract the jewelry from the current background and isolate it perfectly. Place the jewelry on a pure, solid, completely uniform ${bgColor} background. Do not add any shadows or reflections that touch the edges.`;
+                
+                if (enhance) {
+                    prompt += ` Completely enhance the image to look like a high-end, professional commercial jewelry photograph. Make the gemstones sparkle brilliantly, sharpen the details of the metal, fix the lighting to be studio-quality, and ensure the piece looks luxurious and flawless.`;
+                } else {
+                    prompt += ` Maintain the original lighting, texture, and quality of the jewelry exactly as it is in the uploaded photo.`;
+                }
+
+                const payload = {
+                    contents: [{
+                        role: "user",
+                        parts: [
+                            { text: prompt },
+                            {
+                                inlineData: {
+                                    mimeType: originalImage.mimeType,
+                                    data: originalImage.base64
+                                }
+                            }
+                        ]
+                    }],
+                    generationConfig: {
+                        responseModalities: ['IMAGE'],
+                        // Enforcing 4:3 Aspect Ratio as requested
+                        imageConfig: { aspectRatio: "4:3" }
+                    }
+                };
+
+                try {
+                    const result = await fetchWithRetry(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    const part = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+                    
+                    if (!part) {
+                        throw new Error('Unexpected response format from the AI model. Please try again.');
+                    }
+
+                    const imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                    setProcessedImage(imageUrl);
+
+                } catch (err) {
+                    console.error(err);
+                    setError(err.message || 'An error occurred during processing. Please try again.');
+                } finally {
+                    setIsProcessing(false);
+                }
+            };
+
+            const downloadImage = () => {
+                if (!processedImage) return;
+                const link = document.createElement('a');
+                link.href = processedImage;
+                link.download = `jewelry_enhanced_${Date.now()}.png`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            };
+
+            const clearAll = () => {
+                setOriginalImage(null);
+                setProcessedImage(null);
+                setError(null);
+                if (fileInputRef.current) fileInputRef.current.value = '';
+            };
+
+            return (
+                <div className="max-w-6xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
+                    {/* Header */}
+                    <header className="text-center mb-10">
+                        <div className="inline-flex items-center justify-center p-3 bg-gold-100 dark:bg-gold-900/30 rounded-full mb-4">
+                            <Icon name="gem" className="w-8 h-8 text-gold-600 dark:text-gold-400" />
+                        </div>
+                        <h1 className="text-3xl font-light text-gray-900 dark:text-white tracking-tight sm:text-4xl">
+                            Jewelry Studio <span className="font-semibold text-gold-600 dark:text-gold-500">Pro</span>
+                        </h1>
+                        <p className="mt-3 max-w-2xl mx-auto text-xl text-gray-500 dark:text-gray-400 sm:mt-4">
+                            AI-powered background removal and professional studio enhancement for your jewelry photography.
+                        </p>
+                    </header>
+
+                    {/* Main Content Area */}
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                        
+                        {/* Left Column: Controls & Upload */}
+                        <div className="lg:col-span-4 space-y-6">
+                            
+                            {/* Upload Section */}
+                            <div className="glass-panel rounded-2xl p-6">
+                                <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">1. Upload Photo</h2>
+                                {!originalImage ? (
+                                    <div className="mt-1 flex flex-col items-center justify-center px-6 pt-6 pb-6 border-2 border-gray-300 dark:border-gray-600 border-dashed rounded-xl bg-white/50 dark:bg-gray-800/50 transition-colors group hover:border-gold-400 dark:hover:border-gold-500">
+                                        <Icon name="image-plus" className="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500 group-hover:text-gold-500 transition-colors" />
+                                        <div className="flex flex-col sm:flex-row gap-3 mt-5 w-full">
+                                            <button 
+                                                onClick={triggerFileInput}
+                                                className="flex-1 flex justify-center items-center gap-2 px-4 py-2.5 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg hover:border-gold-500 hover:text-gold-600 dark:hover:text-gold-400 transition-all text-sm font-medium text-gray-700 dark:text-gray-200 shadow-sm"
+                                            >
+                                                <Icon name="upload" className="w-4 h-4" />
+                                                Upload File
+                                            </button>
+                                            <button 
+                                                onClick={triggerCameraInput}
+                                                className="flex-1 flex justify-center items-center gap-2 px-4 py-2.5 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg hover:border-gold-500 hover:text-gold-600 dark:hover:text-gold-400 transition-all text-sm font-medium text-gray-700 dark:text-gray-200 shadow-sm"
+                                            >
+                                                <Icon name="camera" className="w-4 h-4" />
+                                                Take Photo
+                                            </button>
+                                        </div>
+                                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-4">PNG, JPG up to 10MB</p>
+                                    </div>
+                                ) : (
+                                    <div className="relative rounded-xl overflow-hidden bg-gray-100 dark:bg-gray-800 aspect-square flex items-center justify-center border border-gray-200 dark:border-gray-700">
+                                        <img src={originalImage.dataUrl} alt="Original" className="max-h-full object-contain" />
+                                        <button 
+                                            onClick={clearAll}
+                                            className="absolute top-2 right-2 bg-white/80 dark:bg-gray-900/80 backdrop-blur p-1.5 rounded-full text-gray-600 dark:text-gray-300 hover:text-red-500 dark:hover:text-red-400 transition-colors shadow-sm"
+                                            title="Remove image"
+                                        >
+                                            <Icon name="x" className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                )}
+                                <input 
+                                    type="file" 
+                                    ref={fileInputRef} 
+                                    onChange={handleFileUpload} 
+                                    accept="image/*" 
+                                    className="hidden" 
+                                />
+                                <input 
+                                    type="file" 
+                                    ref={cameraInputRef} 
+                                    onChange={handleFileUpload} 
+                                    accept="image/*" 
+                                    capture="environment"
+                                    className="hidden" 
+                                />
+                            </div>
+
+                            {/* Settings Section */}
+                            <div className="glass-panel rounded-2xl p-6 transition-opacity duration-300">
+                                <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">2. Studio Settings</h2>
+                                
+                                <div className="space-y-5">
+                                    {/* Background Color */}
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Target Background</label>
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <button
+                                                onClick={() => setBgColor('white')}
+                                                className={`flex items-center justify-center px-4 py-2 border rounded-lg text-sm font-medium transition-all ${
+                                                    bgColor === 'white' 
+                                                    ? 'border-gold-500 bg-gold-50 dark:bg-gold-900/30 text-gold-700 dark:text-gold-400 ring-1 ring-gold-500' 
+                                                    : 'border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'
+                                                }`}
+                                            >
+                                                <div className="w-4 h-4 rounded-full border border-gray-300 dark:border-gray-500 bg-white mr-2"></div>
+                                                White
+                                            </button>
+                                            <button
+                                                onClick={() => setBgColor('black')}
+                                                className={`flex items-center justify-center px-4 py-2 border rounded-lg text-sm font-medium transition-all ${
+                                                    bgColor === 'black' 
+                                                    ? 'border-gray-900 dark:border-gray-400 bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white ring-1 ring-gray-900 dark:ring-gray-400' 
+                                                    : 'border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'
+                                                }`}
+                                            >
+                                                <div className="w-4 h-4 rounded-full border border-gray-600 bg-black mr-2"></div>
+                                                Black
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Quality Enhancement */}
+                                    <div className="flex items-center justify-between pt-2 border-t border-gray-100 dark:border-gray-700">
+                                        <div>
+                                            <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Pro Enhancement</label>
+                                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Improve lighting, sharpness, and glow</p>
+                                        </div>
+                                        <button 
+                                            onClick={() => setEnhance(!enhance)}
+                                            className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${enhance ? 'bg-gold-500' : 'bg-gray-200 dark:bg-gray-600'}`}
+                                        >
+                                            <span aria-hidden="true" className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${enhance ? 'translate-x-5' : 'translate-x-0'}`}></span>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <button
+                                    onClick={processImage}
+                                    disabled={!originalImage || isProcessing}
+                                    className={`w-full mt-6 flex items-center justify-center px-4 py-3 border border-transparent text-base font-medium rounded-xl text-white shadow-sm transition-all ${
+                                        !originalImage || isProcessing
+                                        ? 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+                                        : 'bg-gray-900 dark:bg-gold-600 hover:bg-gray-800 dark:hover:bg-gold-500 hover:shadow-md active:transform active:scale-[0.98]'
+                                    }`}
+                                >
+                                    {isProcessing ? (
+                                        <div className="flex items-center space-x-2">
+                                            <div className="loader border-t-white w-5 h-5"></div>
+                                            <span>Processing...</span>
+                                        </div>
+                                    ) : (
+                                        <div className="flex items-center space-x-2">
+                                            <Icon name="wand-2" className="w-5 h-5" />
+                                            <span>Generate Professional Image</span>
+                                        </div>
+                                    )}
+                                </button>
+                            </div>
+
+                            {/* Error Message */}
+                            {error && (
+                                <div className="bg-red-50 dark:bg-red-900/30 border-l-4 border-red-500 p-4 rounded-md mt-4">
+                                    <div className="flex">
+                                        <div className="flex-shrink-0">
+                                            <Icon name="alert-circle" className="h-5 w-5 text-red-400 dark:text-red-500" />
+                                        </div>
+                                        <div className="ml-3">
+                                            <p className="text-sm text-red-700 dark:text-red-300">{error}</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Right Column: Result Preview */}
+                        <div className="lg:col-span-8">
+                            <div className="glass-panel rounded-2xl p-6 h-full min-h-[500px] flex flex-col">
+                                <div className="flex items-center justify-between mb-4">
+                                    <h2 className="text-lg font-medium text-gray-900 dark:text-white">3. Result Preview</h2>
+                                    {processedImage && (
+                                        <button
+                                            onClick={downloadImage}
+                                            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-lg shadow-sm text-white bg-gold-600 hover:bg-gold-700 transition-colors"
+                                        >
+                                            <Icon name="download" className="w-4 h-4 mr-2" />
+                                            Download High-Res
+                                        </button>
+                                    )}
+                                </div>
+                                
+                                <div className={`flex-1 rounded-xl border-2 border-dashed flex items-center justify-center overflow-hidden transition-all duration-500 ${
+                                    processedImage ? 'border-transparent bg-gray-50 dark:bg-gray-900' : 'border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50'
+                                }`}>
+                                    {processedImage ? (
+                                        <img 
+                                            src={processedImage} 
+                                            alt="Processed Jewelry" 
+                                            draggable={true}
+                                            onDragStart={(e) => {
+                                                // Ensures cross-application compatibility for drag and drop
+                                                e.dataTransfer.setData("text/uri-list", processedImage);
+                                            }}
+                                            className="w-full h-full object-contain drop-shadow-xl cursor-grab active:cursor-grabbing"
+                                        />
+                                    ) : isProcessing ? (
+                                        <div className="text-center text-gray-400 dark:text-gray-500">
+                                            <div className="loader mx-auto mb-4 w-10 h-10 border-4 border-t-gold-500"></div>
+                                            <p className="animate-pulse">Applying studio magic...</p>
+                                        </div>
+                                    ) : (
+                                        <div className="text-center text-gray-400 dark:text-gray-500">
+                                            <Icon name="image" className="mx-auto h-16 w-16 text-gray-300 dark:text-gray-600 mb-3" />
+                                            <p>Your enhanced photo will appear here</p>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
+```
